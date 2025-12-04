@@ -92,3 +92,176 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import json
+import gzip
+import pickle
+import os
+
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import make_scorer, balanced_accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score, balanced_accuracy_score
+from sklearn.metrics import confusion_matrix
+
+
+def pregunta_1():
+    def cargar_datos(ruta_archivo):
+        return pd.read_csv(ruta_archivo, index_col=False, compression="zip")
+
+    def depurar_datos(tabla):
+        tabla = tabla.rename(columns={"default payment next month": "default"})
+        tabla = tabla.drop(columns=["ID"])
+        tabla = tabla.dropna()
+        tabla["EDUCATION"] = tabla["EDUCATION"].apply(lambda valor: valor if valor < 4 else 4)
+        return tabla
+
+    def construir_pipeline():
+        columnas_categoricas = ["SEX", "EDUCATION", "MARRIAGE"]
+
+        transformador = ColumnTransformer(
+            transformers=[
+                ("cat", OneHotEncoder(handle_unknown="ignore"), columnas_categoricas)
+            ],
+            remainder="passthrough",
+        )
+
+        flujo = Pipeline(
+            steps=[
+                ("preprocessor", transformador),
+                ("classifier", RandomForestClassifier(random_state=42)),
+            ]
+        )
+
+        return flujo
+
+    def optimizar_modelo(flujo, X_entrenamiento, y_entrenamiento):
+        rejilla_parametros = {
+            "classifier__n_estimators": [100, 200, 300],
+            "classifier__max_depth": [None, 10, 20, 30],
+            "classifier__min_samples_split": [2, 5, 10],
+        }
+
+        criterio = make_scorer(balanced_accuracy_score)
+
+        busqueda = GridSearchCV(
+            estimator=flujo,
+            param_grid=rejilla_parametros,
+            scoring=criterio,
+            cv=10,
+            n_jobs=-1,
+            verbose=1,
+        )
+
+        busqueda.fit(X_entrenamiento, y_entrenamiento)
+        return busqueda
+
+    def guardar_modelo(modelo, ruta_salida="files/models/model.pkl.gz"):
+        os.makedirs(os.path.dirname(ruta_salida), exist_ok=True)
+        with gzip.open(ruta_salida, "wb") as archivo_binario:
+            pickle.dump(modelo, archivo_binario)
+
+    def evaluar_y_guardar_metricas(
+        modelo,
+        X_entrenamiento,
+        y_entrenamiento,
+        X_prueba,
+        y_prueba,
+        ruta_salida="files/output/metrics.json",
+    ):
+        os.makedirs(os.path.dirname(ruta_salida), exist_ok=True)
+        lista_metricas = []
+
+        conjuntos = [
+            ("train", X_entrenamiento, y_entrenamiento),
+            ("test", X_prueba, y_prueba),
+        ]
+
+        for nombre_conjunto, X_actual, y_real in conjuntos:
+            y_estimado = modelo.predict(X_actual)
+            resultado = {
+                "type": "metrics",
+                "dataset": nombre_conjunto,
+                "precision": precision_score(y_real, y_estimado),
+                "balanced_accuracy": balanced_accuracy_score(y_real, y_estimado),
+                "recall": recall_score(y_real, y_estimado),
+                "f1_score": f1_score(y_real, y_estimado),
+            }
+            lista_metricas.append(resultado)
+
+        with open(ruta_salida, "w", encoding="utf-8") as archivo_json:
+            for registro in lista_metricas:
+                archivo_json.write(json.dumps(registro) + "\n")
+
+    def agregar_matrices_confusion(
+        modelo,
+        X_entrenamiento,
+        y_entrenamiento,
+        X_prueba,
+        y_prueba,
+        ruta_salida="files/output/metrics.json",
+    ):
+        with open(ruta_salida, "r", encoding="utf-8") as archivo_json:
+            registros = [json.loads(linea) for linea in archivo_json]
+
+        conjuntos = [
+            ("train", X_entrenamiento, y_entrenamiento),
+            ("test", X_prueba, y_prueba),
+        ]
+
+        for nombre_conjunto, X_actual, y_real in conjuntos:
+            y_estimado = modelo.predict(X_actual)
+            matriz = confusion_matrix(y_real, y_estimado, labels=[0, 1])
+            matriz_dict = {
+                "type": "cm_matrix",
+                "dataset": nombre_conjunto,
+                "true_0": {
+                    "predicted_0": int(matriz[0][0]),
+                    "predicted_1": int(matriz[0][1]),
+                },
+                "true_1": {
+                    "predicted_0": int(matriz[1][0]),
+                    "predicted_1": int(matriz[1][1]),
+                },
+            }
+            registros.append(matriz_dict)
+
+        with open(ruta_salida, "w", encoding="utf-8") as archivo_json:
+            for registro in registros:
+                archivo_json.write(json.dumps(registro) + "\n")
+
+    # -----------------------------------------
+    # Flujo principal
+    # -----------------------------------------
+
+    ruta_entrada = "files/input/"
+    tabla_train = cargar_datos(ruta_entrada + "train_data.csv.zip")
+    tabla_test = cargar_datos(ruta_entrada + "test_data.csv.zip")
+
+    tabla_train = depurar_datos(tabla_train)
+    tabla_test = depurar_datos(tabla_test)
+
+    X_prueba = tabla_test.drop(columns=["default"])
+    y_prueba = tabla_test["default"]
+
+    X_entrenamiento = tabla_train.drop(columns=["default"])
+    y_entrenamiento = tabla_train["default"]
+
+    flujo_modelo = construir_pipeline()
+    mejor_estimador = optimizar_modelo(flujo_modelo, X_entrenamiento, y_entrenamiento)
+
+    guardar_modelo(mejor_estimador)
+    evaluar_y_guardar_metricas(
+        mejor_estimador, X_entrenamiento, y_entrenamiento, X_prueba, y_prueba
+    )
+    agregar_matrices_confusion(
+        mejor_estimador, X_entrenamiento, y_entrenamiento, X_prueba, y_prueba
+    )
+
+
+if __name__ == "__main__":
+    pregunta_1()
